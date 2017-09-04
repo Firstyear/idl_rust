@@ -1,21 +1,21 @@
 
-
 use std::ops::{BitAnd, BitOr};
 use std::fmt;
 use std::iter::FromIterator;
 use std::cmp::Ordering;
+use std::slice::Iter;
 
 
-trait IDL {
+pub trait IDL {
     fn push_id(&mut self, value: u64);
     fn len(&self) -> usize;
 }
 
 #[derive(Debug, PartialEq)]
-struct IDLSimple(Vec<u64>);
+pub struct IDLSimple(Vec<u64>);
 
 impl IDLSimple {
-    fn new() -> Self {
+    pub fn new() -> Self {
         IDLSimple(Vec::with_capacity(8))
     }
 }
@@ -39,6 +39,34 @@ impl FromIterator<u64> for IDLSimple {
             list.push(i);
         }
         IDLSimple(list)
+    }
+}
+
+#[derive(Debug)]
+pub struct IDLSimpleIter<'b> {
+    simpleiter: std::slice::Iter<'b, u64>,
+}
+
+impl<'b> Iterator for IDLSimpleIter<'b> {
+    type Item = u64;
+
+    fn next(&mut self) -> Option<u64> {
+        if let Some(id) = self.simpleiter.next() {
+            Some(id.clone())
+        } else {
+            None
+        }
+    }
+}
+
+impl<'b> IntoIterator for &'b IDLSimple {
+    type Item = u64;
+    type IntoIter = IDLSimpleIter<'b>;
+
+    fn into_iter(self) -> Self::IntoIter {
+        IDLSimpleIter {
+            simpleiter: (&self.0).into_iter(),
+        }
     }
 }
 
@@ -169,7 +197,7 @@ impl IDLRange {
 }
 
 #[derive(PartialEq)]
-struct IDLBitRange {
+pub struct IDLBitRange {
     list: Vec<IDLRange>,
 }
 
@@ -332,7 +360,7 @@ impl BitOr for IDLBitRange
 }
 
 #[derive(Debug)]
-struct IDLBitRangeIter<'a> {
+pub struct IDLBitRangeIter<'a> {
     // rangeiter: std::vec::IntoIter<IDLRange>,
     rangeiter: std::slice::Iter<'a, IDLRange>,
     currange: Option<&'a IDLRange>,
@@ -441,6 +469,16 @@ mod tests {
         let idl_a = IDLBitRange::from_iter(vec![1, 2, 3, 4, 35, 64, 65, 128, 150]);
         let idl_b = IDLBitRange::from_iter(vec![2, 3, 8, 35, 64, 128, 130, 150, 152, 180]);
         let idl_expect = IDLBitRange::from_iter(vec![2, 3, 35, 64, 128, 150]);
+
+        let idl_result = idl_a & idl_b;
+        assert_eq!(idl_result, idl_expect);
+    }
+
+    #[test]
+    fn test_simple_intersection_4() {
+        let idl_a = IDLSimple::from_iter(vec![2, 3, 8, 35, 64, 128, 130, 150, 152, 180, 256, 800, 900]);
+        let idl_b = IDLSimple::from_iter(1..1024);
+        let idl_expect = IDLSimple::from_iter(vec![2, 3, 8, 35, 64, 128, 130, 150, 152, 180, 256, 800, 900]);
 
         let idl_result = idl_a & idl_b;
         assert_eq!(idl_result, idl_expect);

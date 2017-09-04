@@ -3,4 +3,9 @@ name = "idl_poc"
 version = "0.1.0"
 authors = ["William Brown <william@blackhats.net.au>"]
 
+[[bin]]
+name = "bench_idl"
+path = "src/bench.rs"
+
 [dependencies]
+time = "0.1"
