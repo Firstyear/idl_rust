@@ -16,7 +16,7 @@ pub struct IDLSimple(Vec<u64>);
 
 impl IDLSimple {
     pub fn new() -> Self {
-        IDLSimple(Vec::with_capacity(8))
+        IDLSimple(Vec::with_capacity(128))
     }
 }
 
@@ -30,6 +30,7 @@ impl IDL for IDLSimple {
         let &IDLSimple(ref list) = self;
         list.len()
     }
+
 }
 
 impl FromIterator<u64> for IDLSimple {
@@ -89,7 +90,8 @@ impl BitAnd for IDLSimple
             let r = rnext.unwrap();
 
             if l == r {
-                result.push_id(l.clone());
+                // result.push_id(l.clone());
+                result.push_id(*l);
                 lnext = liter.next();
                 rnext = riter.next();
             } else if l < r {
@@ -271,11 +273,13 @@ impl BitAnd for IDLBitRange
          * If one candidate range has only a single range,
          * we can do a much faster search / return.
          */
+        /* comment out unless implemented for IDLsimple
         if self.list.len() == 1 {
             return rhs.bstbitand(self.list.first().unwrap());
         } else if rhs.list.len() == 1 {
             return self.bstbitand(rhs.list.first().unwrap());
         }
+        */
 
         let mut result = IDLBitRange::new();
 
