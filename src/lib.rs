@@ -5,6 +5,10 @@ use std::iter::FromIterator;
 use std::cmp::Ordering;
 use std::slice::Iter;
 
+pub trait AndNot<RHS = Self> {
+    type Output;
+    fn andnot(self, rhs: RHS) -> Self::Output;
+}
 
 pub trait IDL {
     fn push_id(&mut self, value: u64);
@@ -17,6 +21,14 @@ pub struct IDLSimple(Vec<u64>);
 impl IDLSimple {
     pub fn new() -> Self {
         IDLSimple(Vec::with_capacity(128))
+    }
+
+    fn bstbitand(&self, candidate: &u64) -> Self {
+        let mut result = IDLSimple::new();
+        if let Ok(idx) = self.0.binary_search(candidate) {
+            result.0.push(*candidate);
+        };
+        result
     }
 }
 
@@ -75,8 +87,17 @@ impl BitAnd for IDLSimple
 {
     type Output = Self;
 
-    fn bitand(self, IDLSimple(rhs): Self) -> Self {
+    fn bitand(self, other: Self) -> Self {
+
+        if self.0.len() == 1 {
+            return other.bstbitand(self.0.first().unwrap());
+        } else if other.0.len() == 1 {
+            return self.bstbitand(other.0.first().unwrap());
+        }
+
+        let IDLSimple(rhs) = other;
         let IDLSimple(lhs) = self;
+
         let mut result = IDLSimple::new();
 
         let mut liter = lhs.iter();
@@ -154,7 +175,46 @@ impl BitOr for IDLSimple
     }
 }
 
+impl AndNot for IDLSimple {
+    type Output = Self;
 
+    fn andnot(self, IDLSimple(rhs): Self) -> Self {
+        let IDLSimple(lhs) = self;
+        let mut result = IDLSimple::new();
+
+        /*  LEFT is the a not b, IE a - b set wise. */
+        let mut liter = lhs.iter();
+        let mut riter = rhs.iter();
+
+        let mut lnext = liter.next();
+        let mut rnext = riter.next();
+
+        while lnext.is_some() && rnext.is_some() {
+            let l = lnext.unwrap();
+            let r = rnext.unwrap();
+
+            if l < r {
+                result.push_id(l.clone());
+                lnext = liter.next();
+            } else if l == r {
+                lnext = liter.next();
+                rnext = riter.next();
+            } else if l > r {
+                rnext = riter.next();
+            }
+
+        };
+
+        /* Push the remaining A set elements. */
+        while lnext.is_some() {
+            let l = lnext.unwrap();
+            result.push_id(l.clone());
+            lnext = liter.next();
+        }
+
+        result
+    }
+}
 
 #[derive(Debug)]
 struct IDLRange {
@@ -273,13 +333,17 @@ impl BitAnd for IDLBitRange
          * If one candidate range has only a single range,
          * we can do a much faster search / return.
          */
-        /* comment out unless implemented for IDLsimple
+        /*
+         * lkrispen: comment out unless implemented for IDLsimple
+         * wibrown: Well, this doesn't exist today on IDL, so it's
+         * fair to take any improvement we can :) But I'll add it
+         * to IDL simple anyway.
+         */
         if self.list.len() == 1 {
             return rhs.bstbitand(self.list.first().unwrap());
         } else if rhs.list.len() == 1 {
             return self.bstbitand(rhs.list.first().unwrap());
         }
-        */
 
         let mut result = IDLBitRange::new();
 
@@ -363,6 +427,48 @@ impl BitOr for IDLBitRange
     }
 }
 
+impl AndNot for IDLBitRange {
+    type Output = Self;
+
+    fn andnot(self, rhs: Self) -> Self {
+        let mut result = IDLBitRange::new();
+
+        let mut liter = self.list.iter();
+        let mut riter = rhs.list.iter();
+
+        let mut lnextrange = liter.next();
+        let mut rnextrange = riter.next();
+
+        while lnextrange.is_some() && rnextrange.is_some() {
+            let l = lnextrange.unwrap();
+            let r = rnextrange.unwrap();
+
+            if l.range == r.range {
+                let mask = l.mask & (!r.mask);
+                if mask > 0 {
+                    let newrange = IDLRange::new(l.range, mask);
+                    result.list.push(newrange);
+                }
+                lnextrange = liter.next();
+                rnextrange = riter.next();
+            } else if l.range < r.range {
+                lnextrange = liter.next();
+            } else {
+                rnextrange = riter.next();
+            }
+        }
+
+        while lnextrange.is_some() {
+            let l = lnextrange.unwrap();
+
+            let newrange = IDLRange::new(l.range, l.mask);
+            result.list.push(newrange);
+            lnextrange = liter.next();
+        }
+        result
+    }
+}
+
 #[derive(Debug)]
 pub struct IDLBitRangeIter<'a> {
     // rangeiter: std::vec::IntoIter<IDLRange>,
@@ -424,7 +530,7 @@ impl fmt::Debug for IDLBitRange {
 #[cfg(test)]
 mod tests {
     // use test::Bencher;
-    use super::{IDL, IDLSimple, IDLBitRange};
+    use super::{IDL, IDLSimple, IDLBitRange, AndNot};
     use std::iter::FromIterator;
 
     #[test]
@@ -595,6 +701,66 @@ mod tests {
         let idl_expect = IDLBitRange::from_iter(1..1024);
 
         let idl_result = idl_a | idl_b;
+        assert_eq!(idl_result, idl_expect);
+    }
+
+    #[test]
+    fn test_simple_not_1() {
+        let idl_a = IDLSimple::from_iter(vec![1,2,3,4,5,6]);
+        let idl_b = IDLSimple::from_iter(vec![3,4]);
+        let idl_expect = IDLSimple::from_iter(vec![1,2,5,6]);
+
+        let idl_result = idl_a.andnot(idl_b);
+        assert_eq!(idl_result, idl_expect);
+    }
+
+    #[test]
+    fn test_simple_not_2() {
+        let idl_a = IDLSimple::from_iter(vec![1,2,3,4,5,6]);
+        let idl_b = IDLSimple::from_iter(vec![10]);
+        let idl_expect = IDLSimple::from_iter(vec![1,2,3,4,5,6]);
+
+        let idl_result = idl_a.andnot(idl_b);
+        assert_eq!(idl_result, idl_expect);
+    }
+
+    #[test]
+    fn test_simple_not_3() {
+        let idl_a = IDLSimple::from_iter(vec![2,3,4,5,6]);
+        let idl_b = IDLSimple::from_iter(vec![1]);
+        let idl_expect = IDLSimple::from_iter(vec![2,3,4,5,6]);
+
+        let idl_result = idl_a.andnot(idl_b);
+        assert_eq!(idl_result, idl_expect);
+    }
+
+    #[test]
+    fn test_range_not_1() {
+        let idl_a = IDLBitRange::from_iter(vec![1,2,3,4,5,6]);
+        let idl_b = IDLBitRange::from_iter(vec![3,4]);
+        let idl_expect = IDLBitRange::from_iter(vec![1,2,5,6]);
+
+        let idl_result = idl_a.andnot(idl_b);
+        assert_eq!(idl_result, idl_expect);
+    }
+
+    #[test]
+    fn test_range_not_2() {
+        let idl_a = IDLBitRange::from_iter(vec![1,2,3,4,5,6]);
+        let idl_b = IDLBitRange::from_iter(vec![10]);
+        let idl_expect = IDLBitRange::from_iter(vec![1,2,3,4,5,6]);
+
+        let idl_result = idl_a.andnot(idl_b);
+        assert_eq!(idl_result, idl_expect);
+    }
+
+    #[test]
+    fn test_range_not_3() {
+        let idl_a = IDLBitRange::from_iter(vec![2,3,4,5,6]);
+        let idl_b = IDLBitRange::from_iter(vec![1]);
+        let idl_expect = IDLBitRange::from_iter(vec![2,3,4,5,6]);
+
+        let idl_result = idl_a.andnot(idl_b);
         assert_eq!(idl_result, idl_expect);
     }
 
