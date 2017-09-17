@@ -163,6 +163,53 @@ fn test_triplex(id: &str, a: Vec<u64>, b: Vec<u64>, c: Vec<u64>) {
     println!("=====");
 }
 
+fn bench_c_range(id: &str, a: Vec<u64>, b: Vec<u64>, c: Vec<u64>) {
+    let idl_a = IDLBitRange::from_iter(a);
+    let idl_b = IDLBitRange::from_iter(b);
+    let uids: Vec<IDLBitRange> = c.iter()
+                                  .map(|&x| IDLBitRange::from_u64(x) )
+                                  .collect();
+
+    let start = time::now();
+    let mut uid_iter = uids.into_iter();
+
+    // Get the first range
+    let idl_start = uid_iter.next().unwrap();
+
+    let idl_inter = uid_iter.fold(idl_start, |acc, x| acc | x);
+
+    let idl_result = idl_a & idl_b & idl_inter;
+    let result = range_consume_results(&idl_result);
+    let end = time::now();
+    println!("range 3  comp  {}: {} -> {}", id, end - start, result);
+}
+
+fn bench_c_simple(id: &str, a: Vec<u64>, b: Vec<u64>, c: Vec<u64>) {
+    let idl_a = IDLSimple::from_iter(a);
+    let idl_b = IDLSimple::from_iter(b);
+    let uids: Vec<IDLSimple> = c.iter()
+                                  .map(|&x| IDLSimple::from_u64(x) )
+                                  .collect();
+
+    let start = time::now();
+    let mut uid_iter = uids.into_iter();
+
+    // Get the first range
+    let idl_start = uid_iter.next().unwrap();
+
+    let idl_inter = uid_iter.fold(idl_start, |acc, x| acc | x);
+
+    let idl_result = idl_a & idl_b & idl_inter;
+    let result = simple_consume_results(&idl_result);
+    let end = time::now();
+    println!("simple 3 comp  {}: {} -> {}", id, end - start, result);
+}
+
+fn test_complex(id: &str, a: Vec<u64>, b: Vec<u64>, c: Vec<u64>) {
+    bench_c_simple(id, a.clone(), b.clone(), c.clone());
+    bench_c_range(id, a.clone(), b.clone(), c.clone());
+}
+
 fn main() {
     test_duplex(
         "1",
@@ -349,6 +396,13 @@ fn main() {
         vec1,
         vec2,
         vec3,
+    );
+
+    test_complex(
+        "comp: 1",
+        Vec::from_iter(1..102400),
+        Vec::from_iter(51200..102400),
+        vec![2, 3, 35, 64, 128, 150, 152, 180, 256, 900, 1024, 1500, 1600, 2400, 2401, 2403, 4500, 7890, 10000, 40000, 78900],
     );
 }
 

@@ -23,6 +23,12 @@ impl IDLSimple {
         IDLSimple(Vec::with_capacity(128))
     }
 
+    pub fn from_u64(id: u64) -> Self {
+        let mut new = IDLSimple::new();
+        new.push_id(id);
+        new
+    }
+
     fn bstbitand(&self, candidate: &u64) -> Self {
         let mut result = IDLSimple::new();
         if let Ok(idx) = self.0.binary_search(candidate) {
@@ -268,6 +274,12 @@ impl IDLBitRange {
         IDLBitRange {
             list: Vec::new(),
         }
+    }
+
+    pub fn from_u64(id: u64) -> Self {
+        let mut new = IDLBitRange::new();
+        new.push_id(id);
+        new
     }
 
     fn bstbitand(&self, candidate: &IDLRange) -> Self {
