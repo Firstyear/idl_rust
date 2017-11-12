@@ -1,3 +1,4 @@
+
 use std::sync::{Mutex, MutexGuard, RwLock, Arc};
 use std::ops::Deref;
 
@@ -108,6 +109,8 @@ impl<'a, T> CowCellWriteTxn<'a, T>
 
 #[cfg(test)]
 mod tests {
+    extern crate crossbeam;
+
     use super::CowCell;
 
     #[test]
@@ -147,6 +150,62 @@ mod tests {
         println!("rotxn_c {}", *cc_rotxn_c);
         assert_eq!(*cc_rotxn_a, 0);
         println!("rotxn_a {}", *cc_rotxn_a);
+    }
+
+    fn mt_writer(cc: &CowCell<i64>) {
+        let mut last_value: i64 = 0;
+        while (last_value < 100) {
+            let mut cc_wrtxn = cc.begin_write_txn();
+            {
+                let mut_ptr = cc_wrtxn.get_mut();
+                last_value = *mut_ptr;
+                *mut_ptr = *mut_ptr + 1;
+            }
+            cc_wrtxn.commit();
+        }
+    }
+
+    fn rt_writer(cc: &CowCell<i64>) {
+        let mut last_value: i64 = 0;
+        while (last_value < 100) {
+            let cc_rotxn = cc.begin_read_txn();
+            {
+                last_value = *cc_rotxn;
+            }
+        }
+    }
+
+    #[test]
+    fn test_multithread_create() {
+        // Create the new cowcell.
+        let data: i64 = 0;
+        let cc = CowCell::new(data);
+
+        crossbeam::scope(|scope| {
+            let cc_ref = &cc;
+
+            let readers: Vec<_> = (0..7).map(|_| {
+                scope.spawn(move || {
+                    rt_writer(cc_ref);
+                })
+            }).collect();
+
+            let writers: Vec<_> = (0..3).map(|_| {
+                scope.spawn(move || {
+                    mt_writer(cc_ref);
+                })
+            }).collect();
+
+            // Create readers who live until 200
+
+            // join all.
+            /*
+            for w in writers {
+                let x: () = w;
+                // w.join().unwrap();
+            }
+            */
+        });
     }
 }
 

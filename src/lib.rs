@@ -1,4 +1,6 @@
 
+mod cowcell;
+
 use std::ops::{BitAnd, BitOr};
 use std::fmt;
 use std::iter::FromIterator;
