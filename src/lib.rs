@@ -1,11 +1,12 @@
+extern crate crossbeam;
 
-mod cowcell;
+pub mod cowcell;
+pub mod ebrcell;
 
 use std::ops::{BitAnd, BitOr};
 use std::fmt;
 use std::iter::FromIterator;
 use std::cmp::Ordering;
-use std::slice::Iter;
 
 pub trait AndNot<RHS = Self> {
     type Output;
@@ -33,7 +34,7 @@ impl IDLSimple {
 
     fn bstbitand(&self, candidate: &u64) -> Self {
         let mut result = IDLSimple::new();
-        if let Ok(idx) = self.0.binary_search(candidate) {
+        if let Ok(_idx) = self.0.binary_search(candidate) {
             result.0.push(*candidate);
         };
         result
@@ -531,9 +532,9 @@ impl<'a> IntoIterator for &'a IDLBitRange {
 
 impl fmt::Debug for IDLBitRange {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
-        write!(f, "IDLBitRange (compressed) {:?} (decompressed) [ ", self.list);
+        write!(f, "IDLBitRange (compressed) {:?} (decompressed) [ ", self.list).unwrap();
         for id in self {
-            write!(f, "{}, ", id);
+            write!(f, "{}, ", id).unwrap();
         }
         write!(f, "]")
     }
@@ -544,7 +545,7 @@ impl fmt::Debug for IDLBitRange {
 #[cfg(test)]
 mod tests {
     // use test::Bencher;
-    use super::{IDL, IDLSimple, IDLBitRange, AndNot};
+    use super::{IDLSimple, IDLBitRange, AndNot};
     use std::iter::FromIterator;
 
     #[test]

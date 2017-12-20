@@ -2,7 +2,7 @@
 extern crate idl_poc;
 extern crate time;
 
-use idl_poc::{IDL, IDLSimple, IDLBitRange};
+use idl_poc::{IDLSimple, IDLBitRange};
 use std::iter::FromIterator;
 
 // Trying to make these work with trait bounds is literally too hard
