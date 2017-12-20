@@ -159,6 +159,7 @@ mod tests {
             let mut cc_wrtxn = cc.begin_write_txn();
             {
                 let mut_ptr = cc_wrtxn.get_mut();
+                assert!(*mut_ptr >= last_value);
                 last_value = *mut_ptr;
                 *mut_ptr = *mut_ptr + 1;
             }
@@ -171,6 +172,7 @@ mod tests {
         while last_value < 100 {
             let cc_rotxn = cc.begin_read_txn();
             {
+                assert!(*cc_rotxn >= last_value);
                 last_value = *cc_rotxn;
             }
         }

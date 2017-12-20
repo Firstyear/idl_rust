@@ -1,6 +1,6 @@
 
 use crossbeam::epoch::{self, Atomic, Owned, Guard, Shared};
-use std::sync::atomic::Ordering::{Acquire, Release};
+use std::sync::atomic::Ordering::{Relaxed, Release};
 
 use std::sync::{Mutex, MutexGuard};
 use std::ops::Deref;
@@ -33,7 +33,7 @@ impl<T> EbrCell<T>
         // a ptr, so unwrap?
         // let g_ref = &guard;
 
-        let cur = self.active.load(Acquire, g_ref).unwrap();
+        let cur = self.active.load(Relaxed, g_ref).unwrap();
 
         EbrCellReadTxn {
             // guard: guard,
@@ -47,11 +47,10 @@ impl<T> EbrCell<T>
         let mguard = self.write.lock().unwrap();
         /* Do an atomic load of the current value */
         let guard = epoch::pin();
-        let cur_shared = self.active.load(Acquire, &guard).unwrap();
+        let cur_shared = self.active.load(Relaxed, &guard).unwrap();
         /* This is the 'copy' of the copy on write! */
         let data: T = **cur_shared;
         /* Now build the write struct, we'll discard the pin shortly! */
-        /* Should we give this a copy of the atomic pointer? */
         EbrCellWriteTxn {
             work: data,
             caller: self,
@@ -63,10 +62,16 @@ impl<T> EbrCell<T>
         // Yield a read txn?
         let guard = epoch::pin();
 
-        // Make the data Owned.
+        // Load the previous data ready for unlinking
+        let _prev_data = self.active.load(Relaxed, &guard).unwrap();
+        // Make the data Owned, and set it in the active.
         let owned_data: Owned<T> = Owned::new(newdata);
-
         let _shared_data = self.active.store_and_ref(owned_data, Release, &guard);
+        // Finally, set our previous data for cleanup.
+        unsafe {
+            guard.unlinked(_prev_data);
+        }
+        // Then return the current data with a readtxn. Do we need a new guard scope?
     }
 }
 
@@ -161,10 +166,11 @@ mod tests {
 
     fn mt_writer(cc: &EbrCell<i64>) {
         let mut last_value: i64 = 0;
-        while last_value < 100 {
+        while last_value < 500 {
             let mut cc_wrtxn = cc.begin_write_txn();
             {
                 let mut_ptr = cc_wrtxn.get_mut();
+                assert!(*mut_ptr >= last_value);
                 last_value = *mut_ptr;
                 *mut_ptr = *mut_ptr + 1;
             }
@@ -174,10 +180,11 @@ mod tests {
 
     fn rt_writer(cc: &EbrCell<i64>) {
         let mut last_value: i64 = 0;
-        while last_value < 100 {
+        while last_value < 500 {
             let guard = epoch::pin();
             let cc_rotxn = cc.begin_read_txn(&guard);
             {
+                assert!(*cc_rotxn >= last_value);
                 last_value = *cc_rotxn;
             }
         }
