@@ -75,6 +75,20 @@ impl<T> EbrCell<T>
     }
 }
 
+impl<T> Drop for EbrCell<T> {
+    fn drop(&mut self) {
+        // Right, we are dropping! Everything is okay here *except*
+        // that we need to tell our active data to be unlinked, else it may
+        // be dropped "unsafely".
+        let guard = epoch::pin();
+
+        let _prev_data = self.active.load(Relaxed, &guard).unwrap();
+        unsafe {
+            guard.unlinked(_prev_data);
+        }
+    }
+}
+
 #[derive(Debug)]
 pub struct EbrCellReadTxn<'a, T: 'a> {
     // guard: Guard,
