@@ -1,5 +1,5 @@
 
-use crossbeam::epoch::{self, Atomic, Owned, Guard, Shared};
+use crossbeam::epoch::{self, Atomic, Owned, Guard};
 use std::sync::atomic::Ordering::{Relaxed, Release};
 
 use std::sync::{Mutex, MutexGuard};
@@ -12,7 +12,7 @@ pub struct EbrCell<T> {
 }
 
 impl<T> EbrCell<T>
-    where T: Copy
+    where T: Clone
 {
     pub fn new(data: T) -> Self {
         EbrCell {
@@ -28,7 +28,7 @@ impl<T> EbrCell<T>
         let guard = epoch::pin();
         let cur_shared = self.active.load(Relaxed, &guard).unwrap();
         /* This is the 'copy' of the copy on write! */
-        let data: T = **cur_shared;
+        let data: T = (*cur_shared).clone();
         /* Now build the write struct, we'll discard the pin shortly! */
         EbrCellWriteTxn {
             work: data,
@@ -111,7 +111,7 @@ pub struct EbrCellWriteTxn<'a, T: 'a> {
 }
 
 impl<'a, T> EbrCellWriteTxn<'a, T>
-    where T: Copy
+    where T: Clone
 {
     /* commit */
     /* get_mut data */
@@ -121,7 +121,9 @@ impl<'a, T> EbrCellWriteTxn<'a, T>
 
     pub fn commit(&self) {
         /* Write our data back to the EbrCell */
-        self.caller.commit(self.work);
+        // This is not 100% efficent as possible, work out a better solution
+        // later that avoids .clone()
+        self.caller.commit(self.work.clone());
     }
 }
 
@@ -130,6 +132,9 @@ impl<'a, T> EbrCellWriteTxn<'a, T>
 mod tests {
     extern crate crossbeam;
     extern crate time;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+
     use super::EbrCell;
 
     #[test]
@@ -224,6 +229,49 @@ mod tests {
         let end = time::now();
         println!("Ebr MT create :{}", end - start);
     }
+
+    static GC_COUNT: AtomicUsize = AtomicUsize::new(0);
+
+    #[derive(Debug, Clone)]
+    struct TestGcWrapper<T> {
+        data: T
+    }
+
+    impl<T> Drop for TestGcWrapper<T> {
+        fn drop(&mut self) {
+            // Add to the atomic counter ...
+            GC_COUNT.fetch_add(1, Ordering::Release);
+        }
+    }
+
+    fn test_gc_operation_thread(cc: &EbrCell<TestGcWrapper<i64>>) {
+        while GC_COUNT.load(Ordering::Acquire) < 50 {
+            let mut cc_wrtxn = cc.begin_write_txn();
+            {
+                let mut_ptr = cc_wrtxn.get_mut();
+                mut_ptr.data = mut_ptr.data + 1;
+            }
+            cc_wrtxn.commit();
+        }
+    }
+
+    #[test]
+    fn test_gc_operation() {
+        let data = TestGcWrapper{data: 0};
+        let cc = EbrCell::new(data);
+
+        crossbeam::scope(|scope| {
+            let cc_ref = &cc;
+            let _writers: Vec<_> = (0..3).map(|_| {
+                scope.spawn(move || {
+                    test_gc_operation_thread(cc_ref);
+                })
+            }).collect();
+        });
+
+        assert!(GC_COUNT.load(Ordering::Acquire) >= 50);
+    }
+
 }
 
 
