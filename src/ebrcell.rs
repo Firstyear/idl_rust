@@ -21,27 +21,6 @@ impl<T> EbrCell<T>
         }
     }
 
-    pub fn begin_read_txn<'a>(&self, g_ref: &'a Guard) -> EbrCellReadTxn<'a, T> {
-        // When we generate the guard here and give it to the new struct
-        // we get a lifetime error, even though we *should* live as long
-        // as the result, which is buond by 'a ...
-
-        // let guard = epoch::pin();
-
-        // This option returns None on null pointer, but we can never be null
-        // as we have to init with data, and all replacement ALWAYS gives us
-        // a ptr, so unwrap?
-        // let g_ref = &guard;
-
-        let cur = self.active.load(Relaxed, g_ref).unwrap();
-
-        EbrCellReadTxn {
-            // guard: guard,
-            g_ref: g_ref,
-            data: cur,
-        }
-    }
-
     pub fn begin_write_txn(&self) -> EbrCellWriteTxn<T> {
         /* Take the exclusive write lock first */
         let mguard = self.write.lock().unwrap();
@@ -73,6 +52,23 @@ impl<T> EbrCell<T>
         }
         // Then return the current data with a readtxn. Do we need a new guard scope?
     }
+
+    pub fn begin_read_txn(&self) -> EbrCellReadTxn<T> {
+        let guard = epoch::pin();
+
+        // This option returns None on null pointer, but we can never be null
+        // as we have to init with data, and all replacement ALWAYS gives us
+        // a ptr, so unwrap?
+        let cur = {
+            let c = self.active.load(Relaxed, &guard).unwrap();
+            c.as_raw()
+        };
+
+        EbrCellReadTxn {
+            guard: guard,
+            data: cur,
+        }
+    }
 }
 
 impl<T> Drop for EbrCell<T> {
@@ -90,17 +86,18 @@ impl<T> Drop for EbrCell<T> {
 }
 
 #[derive(Debug)]
-pub struct EbrCellReadTxn<'a, T: 'a> {
-    // guard: Guard,
-    g_ref: &'a Guard,
-    data: Shared<'a, T>,
+pub struct EbrCellReadTxn<T> {
+    guard: Guard,
+    data: *const T,
 }
 
-impl<'a, T> Deref for EbrCellReadTxn<'a, T> {
+impl<T> Deref for EbrCellReadTxn<T> {
     type Target = T;
 
     fn deref(&self) -> &T {
-        &self.data
+        unsafe {
+            &(*self.data)
+        }
     }
 }
 
@@ -133,8 +130,6 @@ impl<'a, T> EbrCellWriteTxn<'a, T>
 mod tests {
     extern crate crossbeam;
     extern crate time;
-    use crossbeam::epoch;
-
     use super::EbrCell;
 
     #[test]
@@ -142,9 +137,7 @@ mod tests {
         let data: i64 = 0;
         let cc = EbrCell::new(data);
 
-        let guard = epoch::pin();
-
-        let cc_rotxn_a = cc.begin_read_txn(&guard);
+        let cc_rotxn_a = cc.begin_read_txn();
         assert_eq!(*cc_rotxn_a, 0);
         println!("rotxn_a {}", *cc_rotxn_a);
 
@@ -163,7 +156,7 @@ mod tests {
             assert_eq!(*cc_rotxn_a, 0);
             println!("rotxn_a {}", *cc_rotxn_a);
 
-            let cc_rotxn_b = cc.begin_read_txn(&guard);
+            let cc_rotxn_b = cc.begin_read_txn();
             assert_eq!(*cc_rotxn_b, 0);
             println!("rotxn_b {}", *cc_rotxn_b);
             /* The write txn and it's lock is dropped here */
@@ -171,7 +164,7 @@ mod tests {
         }
 
         /* Start a new txn and see it's still good */
-        let cc_rotxn_c = cc.begin_read_txn(&guard);
+        let cc_rotxn_c = cc.begin_read_txn();
         assert_eq!(*cc_rotxn_c, 1);
         println!("rotxn_c {}", *cc_rotxn_c);
         assert_eq!(*cc_rotxn_a, 0);
@@ -195,8 +188,7 @@ mod tests {
     fn rt_writer(cc: &EbrCell<i64>) {
         let mut last_value: i64 = 0;
         while last_value < 500 {
-            let guard = epoch::pin();
-            let cc_rotxn = cc.begin_read_txn(&guard);
+            let cc_rotxn = cc.begin_read_txn();
             {
                 assert!(*cc_rotxn >= last_value);
                 last_value = *cc_rotxn;

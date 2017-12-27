@@ -202,7 +202,7 @@ mod tests {
         });
 
         let end = time::now();
-        println!("Ebr MT create :{}", end - start);
+        println!("Arc MT create :{}", end - start);
     }
 }
 
