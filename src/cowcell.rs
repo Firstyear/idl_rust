@@ -27,7 +27,7 @@ pub struct CowCell<T> {
 }
 
 impl<T> CowCell<T>
-    where T: Copy
+    where T: Clone
 {
     pub fn new(data: T) -> Self {
         CowCell {
@@ -50,7 +50,7 @@ impl<T> CowCell<T>
         let mguard = self.write.lock().unwrap();
         /* Now take a ro-txn to get the data copied */
         let rwguard = self.active.read().unwrap();
-        let data: T = *(rwguard.data);
+        let data: T = (*rwguard.data).clone();
         /* Now build the write struct */
         CowCellWriteTxn {
             /* This copies the data */
@@ -92,7 +92,7 @@ pub struct CowCellWriteTxn<'a, T: 'a> {
 }
 
 impl<'a, T> CowCellWriteTxn<'a, T>
-    where T: Copy
+    where T: Clone
 {
     /* commit */
     /* get_mut data */
@@ -100,7 +100,7 @@ impl<'a, T> CowCellWriteTxn<'a, T>
         &mut self.work
     }
 
-    pub fn commit(&self) {
+    pub fn commit(self) {
         /* Write our data back to the CowCell */
         self.caller.commit(self.work);
     }
@@ -112,6 +112,7 @@ mod tests {
     extern crate crossbeam;
     extern crate time;
 
+    use std::sync::atomic::{AtomicUsize, Ordering};
     use super::CowCell;
 
     #[test]
@@ -121,7 +122,6 @@ mod tests {
 
         let cc_rotxn_a = cc.begin_read_txn();
         assert_eq!(*cc_rotxn_a, 0);
-        println!("rotxn_a {}", *cc_rotxn_a);
 
         {
             /* Take a write txn */
@@ -133,14 +133,11 @@ mod tests {
                 assert_eq!(*mut_ptr, 0);
                 *mut_ptr = 1;
                 assert_eq!(*mut_ptr, 1);
-                println!("wrtxn {}", *mut_ptr);
             }
             assert_eq!(*cc_rotxn_a, 0);
-            println!("rotxn_a {}", *cc_rotxn_a);
 
             let cc_rotxn_b = cc.begin_read_txn();
             assert_eq!(*cc_rotxn_b, 0);
-            println!("rotxn_b {}", *cc_rotxn_b);
             /* The write txn and it's lock is dropped here */
             cc_wrtxn.commit();
         }
@@ -148,14 +145,12 @@ mod tests {
         /* Start a new txn and see it's still good */
         let cc_rotxn_c = cc.begin_read_txn();
         assert_eq!(*cc_rotxn_c, 1);
-        println!("rotxn_c {}", *cc_rotxn_c);
         assert_eq!(*cc_rotxn_a, 0);
-        println!("rotxn_a {}", *cc_rotxn_a);
     }
 
     fn mt_writer(cc: &CowCell<i64>) {
         let mut last_value: i64 = 0;
-        while last_value < 100 {
+        while last_value < 10 {
             let mut cc_wrtxn = cc.begin_write_txn();
             {
                 let mut_ptr = cc_wrtxn.get_mut();
@@ -169,7 +164,7 @@ mod tests {
 
     fn rt_writer(cc: &CowCell<i64>) {
         let mut last_value: i64 = 0;
-        while last_value < 100 {
+        while last_value < 10 {
             let cc_rotxn = cc.begin_read_txn();
             {
                 assert!(*cc_rotxn >= last_value);
@@ -202,7 +197,52 @@ mod tests {
         });
 
         let end = time::now();
-        println!("Arc MT create :{}", end - start);
+        print!("Arc MT create :{} ", end - start);
+    }
+
+    static GC_COUNT: AtomicUsize = AtomicUsize::new(0);
+
+    #[derive(Debug, Clone)]
+    struct TestGcWrapper<T> {
+        data: T
+    }
+
+    impl<T> Drop for TestGcWrapper<T> {
+        fn drop(&mut self) {
+            // Add to the atomic counter ...
+            GC_COUNT.fetch_add(1, Ordering::Release);
+        }
+    }
+
+    fn test_gc_operation_thread(cc: &CowCell<TestGcWrapper<i64>>) {
+        while GC_COUNT.load(Ordering::Acquire) < 50 {
+            // thread::sleep(std::time::Duration::from_millis(200));
+            {
+                let mut cc_wrtxn = cc.begin_write_txn();
+                {
+                    let mut_ptr = cc_wrtxn.get_mut();
+                    mut_ptr.data = mut_ptr.data + 1;
+                }
+                cc_wrtxn.commit();
+            }
+        }
+    }
+
+    #[test]
+    fn test_gc_operation() {
+        let data = TestGcWrapper{data: 0};
+        let cc = CowCell::new(data);
+
+        crossbeam::scope(|scope| {
+            let cc_ref = &cc;
+            let _writers: Vec<_> = (0..3).map(|_| {
+                scope.spawn(move || {
+                    test_gc_operation_thread(cc_ref);
+                })
+            }).collect();
+        });
+
+        assert!(GC_COUNT.load(Ordering::Acquire) >= 50);
     }
 }
 

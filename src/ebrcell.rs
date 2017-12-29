@@ -3,7 +3,35 @@ use crossbeam::epoch::{self, Atomic, Owned, Guard};
 use std::sync::atomic::Ordering::{Relaxed, Release};
 
 use std::sync::{Mutex, MutexGuard};
+use std::mem;
 use std::ops::Deref;
+
+#[derive(Debug)]
+pub struct EbrCellWriteTxn<'a, T: 'a> {
+    data: Option<T>,
+    // This way we know who to contact for updating our data ....
+    caller: &'a EbrCell<T>,
+    guard: MutexGuard<'a, ()>
+}
+
+impl<'a, T> EbrCellWriteTxn<'a, T>
+    where T: Clone
+{
+    /* commit */
+    /* get_mut data */
+    pub fn get_mut(&mut self) -> &mut T {
+        self.data.as_mut().unwrap()
+    }
+
+    pub fn commit(mut self) {
+        /* Write our data back to the EbrCell */
+        // Now make a new dummy element, and swap it into the mutex
+        // This fixes up ownership of some values for lifetimes.
+        let mut element: Option<T> = None;
+        mem::swap(&mut element, &mut self.data);
+        self.caller.commit(element);
+    }
+}
 
 #[derive(Debug)]
 pub struct EbrCell<T> {
@@ -27,24 +55,23 @@ impl<T> EbrCell<T>
         /* Do an atomic load of the current value */
         let guard = epoch::pin();
         let cur_shared = self.active.load(Relaxed, &guard).unwrap();
-        /* This is the 'copy' of the copy on write! */
-        let data: T = (*cur_shared).clone();
         /* Now build the write struct, we'll discard the pin shortly! */
         EbrCellWriteTxn {
-            work: data,
+            /* This is the 'copy' of the copy on write! */
+            data: Some((*cur_shared).clone()),
             caller: self,
             guard: mguard,
         }
     }
 
-    fn commit(&self, newdata: T) {
+    fn commit(&self, element: Option<T>) {
         // Yield a read txn?
         let guard = epoch::pin();
 
         // Load the previous data ready for unlinking
         let _prev_data = self.active.load(Relaxed, &guard).unwrap();
         // Make the data Owned, and set it in the active.
-        let owned_data: Owned<T> = Owned::new(newdata);
+        let owned_data: Owned<T> = Owned::new(element.unwrap());
         let _shared_data = self.active.store_and_ref(owned_data, Release, &guard);
         // Finally, set our previous data for cleanup.
         unsafe {
@@ -101,39 +128,11 @@ impl<T> Deref for EbrCellReadTxn<T> {
     }
 }
 
-#[derive(Debug)]
-pub struct EbrCellWriteTxn<'a, T: 'a> {
-    // Hold open the guard, and initiate the copy to here.
-    work: T,
-    // This way we know who to contact for updating our data ....
-    caller: &'a EbrCell<T>,
-    guard: MutexGuard<'a, ()>
-}
-
-impl<'a, T> EbrCellWriteTxn<'a, T>
-    where T: Clone
-{
-    /* commit */
-    /* get_mut data */
-    pub fn get_mut(&mut self) -> &mut T {
-        &mut self.work
-    }
-
-    pub fn commit(&self) {
-        /* Write our data back to the EbrCell */
-        // This is not 100% efficent as possible, work out a better solution
-        // later that avoids .clone()
-        self.caller.commit(self.work.clone());
-    }
-}
-
-
 #[cfg(test)]
 mod tests {
     extern crate crossbeam;
     extern crate time;
     use std::sync::atomic::{AtomicUsize, Ordering};
-
 
     use super::EbrCell;
 
@@ -144,7 +143,6 @@ mod tests {
 
         let cc_rotxn_a = cc.begin_read_txn();
         assert_eq!(*cc_rotxn_a, 0);
-        println!("rotxn_a {}", *cc_rotxn_a);
 
         {
             /* Take a write txn */
@@ -156,14 +154,11 @@ mod tests {
                 assert_eq!(*mut_ptr, 0);
                 *mut_ptr = 1;
                 assert_eq!(*mut_ptr, 1);
-                println!("wrtxn {}", *mut_ptr);
             }
             assert_eq!(*cc_rotxn_a, 0);
-            println!("rotxn_a {}", *cc_rotxn_a);
 
             let cc_rotxn_b = cc.begin_read_txn();
             assert_eq!(*cc_rotxn_b, 0);
-            println!("rotxn_b {}", *cc_rotxn_b);
             /* The write txn and it's lock is dropped here */
             cc_wrtxn.commit();
         }
@@ -171,9 +166,7 @@ mod tests {
         /* Start a new txn and see it's still good */
         let cc_rotxn_c = cc.begin_read_txn();
         assert_eq!(*cc_rotxn_c, 1);
-        println!("rotxn_c {}", *cc_rotxn_c);
         assert_eq!(*cc_rotxn_a, 0);
-        println!("rotxn_a {}", *cc_rotxn_a);
     }
 
     fn mt_writer(cc: &EbrCell<i64>) {
@@ -227,7 +220,7 @@ mod tests {
         });
 
         let end = time::now();
-        println!("Ebr MT create :{}", end - start);
+        print!("Ebr MT create :{} ", end - start);
     }
 
     static GC_COUNT: AtomicUsize = AtomicUsize::new(0);
@@ -246,16 +239,19 @@ mod tests {
 
     fn test_gc_operation_thread(cc: &EbrCell<TestGcWrapper<i64>>) {
         while GC_COUNT.load(Ordering::Acquire) < 50 {
-            let mut cc_wrtxn = cc.begin_write_txn();
+            // thread::sleep(std::time::Duration::from_millis(200));
             {
-                let mut_ptr = cc_wrtxn.get_mut();
-                mut_ptr.data = mut_ptr.data + 1;
+                let mut cc_wrtxn = cc.begin_write_txn();
+                {
+                    let mut_ptr = cc_wrtxn.get_mut();
+                    mut_ptr.data = mut_ptr.data + 1;
+                }
+                cc_wrtxn.commit();
             }
-            cc_wrtxn.commit();
         }
     }
 
-    #[test]
+    // #[test]
     fn test_gc_operation() {
         let data = TestGcWrapper{data: 0};
         let cc = EbrCell::new(data);
