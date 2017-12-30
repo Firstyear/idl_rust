@@ -109,11 +109,11 @@ impl<'a, T> CowCellWriteTxn<'a, T>
 
 #[cfg(test)]
 mod tests {
-    extern crate crossbeam;
     extern crate time;
 
     use std::sync::atomic::{AtomicUsize, Ordering};
     use super::CowCell;
+    use crossbeam_utils::scoped;
 
     #[test]
     fn test_simple_create() {
@@ -180,7 +180,7 @@ mod tests {
         let data: i64 = 0;
         let cc = CowCell::new(data);
 
-        crossbeam::scope(|scope| {
+        scoped::scope(|scope| {
             let cc_ref = &cc;
 
             let _readers: Vec<_> = (0..7).map(|_| {
@@ -233,7 +233,7 @@ mod tests {
         let data = TestGcWrapper{data: 0};
         let cc = CowCell::new(data);
 
-        crossbeam::scope(|scope| {
+        scoped::scope(|scope| {
             let cc_ref = &cc;
             let _writers: Vec<_> = (0..3).map(|_| {
                 scope.spawn(move || {

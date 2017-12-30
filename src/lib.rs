@@ -1,4 +1,5 @@
-extern crate crossbeam;
+extern crate crossbeam_epoch;
+extern crate crossbeam_utils;
 
 pub mod cowcell;
 pub mod ebrcell;

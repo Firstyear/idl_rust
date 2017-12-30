@@ -1,5 +1,6 @@
 
-use crossbeam::epoch::{self, Atomic, Owned, Guard};
+use crossbeam_epoch as epoch;
+use crossbeam_epoch::{Atomic, Owned, Guard};
 use std::sync::atomic::Ordering::{Relaxed, Release};
 
 use std::sync::{Mutex, MutexGuard};
@@ -54,11 +55,13 @@ impl<T> EbrCell<T>
         let mguard = self.write.lock().unwrap();
         /* Do an atomic load of the current value */
         let guard = epoch::pin();
-        let cur_shared = self.active.load(Relaxed, &guard).unwrap();
+        let cur_shared = self.active.load(Relaxed, &guard);
         /* Now build the write struct, we'll discard the pin shortly! */
         EbrCellWriteTxn {
             /* This is the 'copy' of the copy on write! */
-            data: Some((*cur_shared).clone()),
+            data: Some(unsafe {
+                cur_shared.deref().clone()
+                }),
             caller: self,
             guard: mguard,
         }
@@ -69,13 +72,15 @@ impl<T> EbrCell<T>
         let guard = epoch::pin();
 
         // Load the previous data ready for unlinking
-        let _prev_data = self.active.load(Relaxed, &guard).unwrap();
+        let prev_data = self.active.load(Relaxed, &guard);
         // Make the data Owned, and set it in the active.
         let owned_data: Owned<T> = Owned::new(element.unwrap());
-        let _shared_data = self.active.store_and_ref(owned_data, Release, &guard);
+        let _shared_data = self.active.compare_and_set(prev_data, owned_data, Release, &guard);
         // Finally, set our previous data for cleanup.
         unsafe {
-            guard.unlinked(_prev_data);
+            guard.defer(move || {
+                drop(prev_data.into_owned());
+            });
         }
         // Then return the current data with a readtxn. Do we need a new guard scope?
     }
@@ -87,7 +92,7 @@ impl<T> EbrCell<T>
         // as we have to init with data, and all replacement ALWAYS gives us
         // a ptr, so unwrap?
         let cur = {
-            let c = self.active.load(Relaxed, &guard).unwrap();
+            let c = self.active.load(Relaxed, &guard);
             c.as_raw()
         };
 
@@ -105,14 +110,16 @@ impl<T> Drop for EbrCell<T> {
         // be dropped "unsafely".
         let guard = epoch::pin();
 
-        let _prev_data = self.active.load(Relaxed, &guard).unwrap();
+        let prev_data = self.active.load(Relaxed, &guard);
         unsafe {
-            guard.unlinked(_prev_data);
+            guard.defer(move || {
+                drop(prev_data.into_owned());
+            });
         }
     }
 }
 
-#[derive(Debug)]
+// #[derive(Debug)]
 pub struct EbrCellReadTxn<T> {
     guard: Guard,
     data: *const T,
@@ -130,11 +137,12 @@ impl<T> Deref for EbrCellReadTxn<T> {
 
 #[cfg(test)]
 mod tests {
-    extern crate crossbeam;
     extern crate time;
+
     use std::sync::atomic::{AtomicUsize, Ordering};
 
     use super::EbrCell;
+    use crossbeam_utils::scoped;
 
     #[test]
     fn test_simple_create() {
@@ -202,7 +210,7 @@ mod tests {
         let data: i64 = 0;
         let cc = EbrCell::new(data);
 
-        crossbeam::scope(|scope| {
+        scoped::scope(|scope| {
             let cc_ref = &cc;
 
             let _readers: Vec<_> = (0..7).map(|_| {
@@ -251,12 +259,12 @@ mod tests {
         }
     }
 
-    // #[test]
+    #[test]
     fn test_gc_operation() {
         let data = TestGcWrapper{data: 0};
         let cc = EbrCell::new(data);
 
-        crossbeam::scope(|scope| {
+        scoped::scope(|scope| {
             let cc_ref = &cc;
             let _writers: Vec<_> = (0..3).map(|_| {
                 scope.spawn(move || {
