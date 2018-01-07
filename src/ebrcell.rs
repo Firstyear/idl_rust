@@ -7,6 +7,15 @@ use std::sync::{Mutex, MutexGuard};
 use std::mem;
 use std::ops::Deref;
 
+/// An `EbrCell` Write Transaction handle.
+///
+/// This allows mutation of the content of the `EbrCell` without blocking or
+/// affecting current readers.
+///
+/// Changes are only stored in the structure until you call commit: to
+/// abort a change, don't call commit and allow the write transaction to
+/// go out of scope. This causes the `EbrCell` to unlock allowing other
+/// writes to proceed.
 #[derive(Debug)]
 pub struct EbrCellWriteTxn<'a, T: 'a> {
     data: Option<T>,
@@ -18,12 +27,16 @@ pub struct EbrCellWriteTxn<'a, T: 'a> {
 impl<'a, T> EbrCellWriteTxn<'a, T>
     where T: Clone
 {
-    /* commit */
-    /* get_mut data */
+    /// Access a mutable pointer of the data in the `EbrCell`. This data is only
+    /// visible to this write transaction object in this thread until you call
+    /// 'commit'.
     pub fn get_mut(&mut self) -> &mut T {
         self.data.as_mut().unwrap()
     }
 
+    /// Commit the changes in this write transaction to the `EbrCell`. This will
+    /// consume the transaction so that further changes can not be made to it
+    /// after this function is called.
     pub fn commit(mut self) {
         /* Write our data back to the EbrCell */
         // Now make a new dummy element, and swap it into the mutex
@@ -34,6 +47,51 @@ impl<'a, T> EbrCellWriteTxn<'a, T>
     }
 }
 
+/// A concurrently readable cell.
+///
+/// This structure behaves in a similar manner to a `RwLock<Box<T>>`. However
+/// unlike a read-write lock, writes and parallel reads can be performed
+/// simultaneously. This means writes do not block reads or reads do not
+/// block writes.
+///
+/// To achieve this a form of "copy-on-write" (or for Rust, clone on write) is
+/// used. As a write transaction begins, we clone the existing data to a new
+/// location that is capable of being mutated.
+///
+/// Readers are guaranteed that the content of the EbrCell will live as long
+/// as the read transaction is open, and will be consistent for the duration
+/// of the transaction. There can be an "unlimited" number of readers in parallel
+/// accessing different generations of data of the EbrCell.
+///
+/// Writers are serialised and are guaranteed they have exclusive write access
+/// to the structure.
+///
+/// # Examples
+/// ```
+/// use idl_poc::ebrcell::EbrCell;
+///
+/// let data: i64 = 0;
+/// let ebrcell = EbrCell::new(data);
+///
+/// // Begin a read transaction
+/// let read_txn = ebrcell.begin_read_txn();
+/// assert_eq!(*read_txn, 0);
+/// {
+///     // Now create a write, and commit it.
+///     let mut write_txn = ebrcell.begin_write_txn();
+///     {
+///         let mut data = write_txn.get_mut();
+///         *data = 1;
+///     }
+///     // Commit the change
+///     write_txn.commit();
+/// }
+/// // Show the previous generation still reads '0'
+/// assert_eq!(*read_txn, 0);
+/// let new_read_txn = ebrcell.begin_read_txn();
+/// // And a new read transaction has '1'
+/// assert_eq!(*new_read_txn, 1);
+/// ```
 #[derive(Debug)]
 pub struct EbrCell<T> {
     write: Mutex<()>,
@@ -43,6 +101,7 @@ pub struct EbrCell<T> {
 impl<T> EbrCell<T>
     where T: Clone
 {
+    /// Create a new EbrCell storing type T. T must implement Clone.
     pub fn new(data: T) -> Self {
         EbrCell {
             write: Mutex::new(()),
@@ -50,6 +109,8 @@ impl<T> EbrCell<T>
         }
     }
 
+    /// Begine a write transaction, returning a write transaction struct.
+    /// This returns an [`EbrCellWriteTxn`]
     pub fn begin_write_txn(&self) -> EbrCellWriteTxn<T> {
         /* Take the exclusive write lock first */
         let mguard = self.write.lock().unwrap();
@@ -67,6 +128,13 @@ impl<T> EbrCell<T>
         }
     }
 
+    /// This is an internal compontent of the commit cycle. It takes ownership
+    /// of the value stored in the writetxn, and commits it to the main EbrCell
+    /// safely.
+    ///
+    /// In theory you could use this as a "lock free" version, but you don't
+    /// know if you are trampling a previous change, so it's private and we
+    /// let the writetxn struct serialise and protect this interface.
     fn commit(&self, element: Option<T>) {
         // Yield a read txn?
         let guard = epoch::pin();
@@ -85,6 +153,9 @@ impl<T> EbrCell<T>
         // Then return the current data with a readtxn. Do we need a new guard scope?
     }
 
+    /// Begin a read transaction. The returned [`EbrCellReadTxn'] guarantees
+    /// the data lives long enough via crossbeam's Epoch type. When this is
+    /// dropped the data *may* be freed at some point in the future.
     pub fn begin_read_txn(&self) -> EbrCellReadTxn<T> {
         let guard = epoch::pin();
 
@@ -97,7 +168,7 @@ impl<T> EbrCell<T>
         };
 
         EbrCellReadTxn {
-            guard: guard,
+            _guard: guard,
             data: cur,
         }
     }
@@ -119,15 +190,18 @@ impl<T> Drop for EbrCell<T> {
     }
 }
 
+/// A read transaction. This stores a reference to the data from the main
+/// `EbrCell`, and guarantees it is alive for the duration of the read.
 // #[derive(Debug)]
 pub struct EbrCellReadTxn<T> {
-    guard: Guard,
+    _guard: Guard,
     data: *const T,
 }
 
 impl<T> Deref for EbrCellReadTxn<T> {
     type Target = T;
 
+    /// Derference and access the value within the read transaction.
     fn deref(&self) -> &T {
         unsafe {
             &(*self.data)
