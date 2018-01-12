@@ -3,7 +3,7 @@ extern crate crossbeam_utils;
 
 pub mod cowcell;
 pub mod ebrcell;
-// pub mod bst;
+pub mod bst;
 
 use std::ops::{BitAnd, BitOr};
 use std::fmt;
