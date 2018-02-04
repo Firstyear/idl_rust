@@ -1,7 +1,10 @@
 
-use crossbeam_epoch::{Atomic, Owned, Shared};
+use crossbeam_epoch as epoch;
+use crossbeam_epoch::{Atomic, Owned, Shared, Guard};
 use std::ptr;
+use std::sync::atomic::Ordering::{Release, Acquire};
 use std::sync::{Mutex, MutexGuard};
+use std::collections::LinkedList;
 
 const CAPACITY: usize = 5;
 const L_CAPACITY: usize = CAPACITY + 1;
@@ -12,18 +15,27 @@ struct Bst<K, V> {
     active: Atomic<BstTxn<K, V>>,
 }
 
-// Diff between write and read txn?
-
 // Does bsttxn impl copy?
 struct BstTxn<K, V> {
-    u64: tid,
+    tid: u64,
     root: *mut BstNode<K, V>,
     length: usize,
     // Contains garbage lists?
     // How can we set the garbage list of the former that we
     // copy from? Unsafe mut on the active? Mutex on the garbage list?
     // Cell of sometype?
-    owned: Vec<*mut BstNode<K, V>>,
+    owned: LinkedList<*mut BstNode<K, V>>,
+}
+
+struct BstWriteTxn<'a, K: 'a, V: 'a> {
+    txn: BstTxn<K, V>,
+    caller: &'a Bst<K, V>,
+    _mguard: MutexGuard<'a, ()>
+}
+
+struct BstReadTxn<K, V> {
+    txn: *const BstTxn<K, V>,
+    _guard: Guard,
 }
 
 struct BstLeaf<K, V> {
@@ -33,6 +45,7 @@ struct BstLeaf<K, V> {
     parent: *mut BstNode<K, V>,
     parent_idx: u16,
     capacity: u16,
+    tid: u64,
 }
 
 struct BstBranch<K, V> {
@@ -41,6 +54,7 @@ struct BstBranch<K, V> {
     parent: *mut BstNode<K, V>,
     parent_idx: u16,
     capacity: u16,
+    tid: u64,
 }
 
 // Do I even need an error type?
@@ -61,7 +75,7 @@ impl <K, V> BstNode<K, V> where
     K: Clone + PartialEq,
     V: Clone,
 {
-    pub fn new_leaf() -> Self {
+    pub fn new_leaf(tid: u64) -> Self {
         BstNode::Leaf {
             inner: BstLeaf {
                 key: [None, None, None, None, None],
@@ -69,11 +83,12 @@ impl <K, V> BstNode<K, V> where
                 parent:  ptr::null_mut(),
                 parent_idx: 0,
                 capacity: 1,
+                tid: tid
             }
         }
     }
 
-    fn new_branch(key: K, left: *mut BstNode<K, V>, right: *mut BstNode<K, V>) -> Self {
+    fn new_branch(key: K, left: *mut BstNode<K, V>, right: *mut BstNode<K, V>, tid: u64) -> Self {
         BstNode::Branch {
             inner: BstBranch {
                 key: [Some(key), None, None, None, None],
@@ -81,6 +96,7 @@ impl <K, V> BstNode<K, V> where
                 parent: ptr::null_mut(),
                 parent_idx: 0,
                 capacity: 1,
+                tid: tid
             }
         }
     }
@@ -126,19 +142,83 @@ impl<K, V> Bst<K, V> where
 {
     pub fn new() -> Self {
         let new_root = Box::new(
-            BstNode::new_leaf()
+            BstNode::new_leaf(0)
         );
         // Create the root txn as empty tree.
-        Bst {
+        let btxn = BstTxn {
+            tid: 0,
             // root: None,
-            root: Box::into_raw(new_root),
+            root: Box::into_raw(new_root) as *mut _,
             length: 0,
+            owned: LinkedList::new(),
+        };
+        // Now push the new txn to our Bst
+        Bst {
+            write: Mutex::new(()),
+            active: Atomic::new(btxn),
         }
     }
 
-    /// Purge everything
-    /// YOU NEED MAP NODES FOR THIS!!!!
-    pub fn clear(&mut self) {
+    fn commit(&self, new_txn: BstTxn<K, V>) -> Result<(), BstErr> {
+        Ok(())
+    }
+
+    pub fn begin_write_txn(&self) -> BstWriteTxn<K, V> {
+        let mguard = self.write.lock().unwrap();
+        let guard = epoch::pin();
+
+        let cur_shared = self.active.load(Acquire, &guard);
+
+        BstWriteTxn {
+            txn: unsafe {
+                // This clones the txn, it increments the tid for us!
+                cur_shared.deref().clone()
+            },
+            caller: self,
+            _mguard: mguard,
+        }
+    }
+
+    pub fn begin_read_txn(&self) -> BstReadTxn<K, V> {
+        let guard = epoch::pin();
+
+        let cur = {
+            let c = self.active.load(Acquire, &guard);
+            c.as_raw()
+        };
+
+        BstReadTxn {
+            txn: cur,
+            _guard: guard,
+        }
+    }
+
+}
+
+impl<K, V> BstTxn<K, V> where
+    K: Clone + PartialEq,
+    V: Clone,
+{
+    #[inline(always)]
+    fn search(&self, key: &K) -> Option<&V> {
+        None
+    }
+
+    #[inline(always)]
+    fn insert(&mut self, key: K, value: V) -> Result<(), BstErr> {
+        /* Recursively insert. */
+        /* This is probably an unsafe .... */
+        unsafe {
+            (*self.root).insert(key, value).and_then(|nr: *mut _ | {
+                self.length += 1;
+                self.root = nr;
+                Ok(())
+            })
+        }
+    }
+
+    #[inline(always)]
+    fn clear(&mut self) {
         // Because this changes root from Some to None, it moves ownership
         // of root to this function, and all it's descendants that are dropped.
 
@@ -147,41 +227,83 @@ impl<K, V> Bst<K, V> where
         // With EBR you need to walk the tree and mark everything to be dropped.
         // Perhaps just the root needs EBR marking?
         let new_root = Box::new(
-            BstNode::new_leaf()
+            BstNode::new_leaf(self.tid)
         );
         self.root = Box::into_raw(new_root);
         self.length = 0;
     }
 
-    pub fn search(&self, key: &K) -> Option<&V> {
+    #[inline(always)]
+    fn remove(&mut self, key: &K) -> Option<(K, V)> {
         None
     }
 
-    /// insert a value
-    pub fn insert(&mut self, key: K, value: V) -> Result<(), BstErr> {
-        /* Recursively insert. */
-        /* This is probably an unsafe .... */
-        (*self.root).insert(key, value).and_then(|nr: *mut _ | {
-            self.length += 1;
-            self.root = nr;
-            Ok(())
-        })
-        /* IN THE FUTURE you will need to update the root here ... maybe */
+    #[inline(always)]
+    fn len(&self) -> usize {
+        self.length
+    }
+}
+
+impl<K, V> Clone for BstTxn<K, V> {
+    fn clone(&self) -> Self {
+        BstTxn {
+            tid: self.tid + 1,
+            // Copies the root
+            root: self.root,
+            length: self.length,
+            owned: LinkedList::new(),
+        }
+    }
+}
+
+impl<K, V> BstReadTxn<K, V> where
+    K: Clone + PartialEq,
+    V: Clone,
+{
+    pub fn search(&self, key: &K) -> Option<&V> {
+        unsafe {
+            (*self.txn).search(key)
+        }
     }
 
-    /// Do we contain a key?
-    pub fn contains_key(&self, key: &K) {
+    pub fn len(&self) -> usize {
+        unsafe {
+            (*self.txn).len()
+        }
+    }
+}
+
+// This is really just a gateway wrapper to the bsttxn fns.
+impl<'a, K, V> BstWriteTxn<'a, K, V> where
+    K: Clone + PartialEq,
+    V: Clone,
+{
+    pub fn search(&self, key: &K) -> Option<&V> {
+        self.txn.search(key)
+    }
+
+    pub fn insert(&mut self, key: K, value: V) -> Result<(), BstErr> {
+        self.txn.insert(key, value)
+    }
+
+    pub fn clear(&mut self) {
+        self.txn.clear()
     }
 
     /// Delete the value
     pub fn remove(&mut self, key: &K) -> Option<(K, V)> {
-        None
+        self.txn.remove(key)
     }
 
     pub fn len(&self) -> usize {
-        self.length
+        self.txn.len()
+    }
+
+    pub fn commit(mut self) -> Result<(), BstErr> {
+        self.caller.commit(self.txn)
     }
 }
+
 
 
 #[cfg(test)]
@@ -189,21 +311,35 @@ mod tests {
     use super::Bst;
 
     #[test]
-    fn test_simple_search() {
+    fn test_insert_search_single() {
         let mut bst: Bst<i64, i64> = Bst::new();
-        assert!(bst.len() == 0);
 
-        bst.insert(0, 0);
-        bst.insert(1, 1);
+        // First, take a read_txn and check it's length.
+        let rotxn_a = bst.begin_read_txn();
+        assert!(rotxn_a.len() == 0);
+        assert!(rotxn_a.search(&0) == None);
+        assert!(rotxn_a.search(&1) == None);
 
-        assert!(bst.len() == 2);
+        {
+            let mut wrtxn_a = bst.begin_write_txn();
 
-        assert!(bst.search(&0) == Some(&0));
-        assert!(bst.search(&1) == Some(&1));
+            wrtxn_a.insert(1, 1);
+            assert!(wrtxn_a.len() == 1);
+            assert!(wrtxn_a.search(&0) == None);
+            assert!(wrtxn_a.search(&1) == Some(&1));
 
-        bst.clear();
+            wrtxn_a.commit();
+        }
 
-        assert!(bst.len() == 0);
-
+        // original read should still show 0 len.
+        assert!(rotxn_a.len() == 0);
+        assert!(rotxn_a.search(&0) == None);
+        assert!(rotxn_a.search(&1) == None);
+        // New read should show 1 len.
+        let rotxn_b = bst.begin_read_txn();
+        assert!(rotxn_b.len() == 1);
+        assert!(rotxn_b.search(&0) == None);
+        assert!(rotxn_b.search(&1) == Some(&1));
+        // Read txn goes out of scope here.
     }
 }
