@@ -82,7 +82,7 @@ impl <K, V> BstNode<K, V> where
                 value: [None, None, None, None, None],
                 parent:  ptr::null_mut(),
                 parent_idx: 0,
-                capacity: 1,
+                capacity: 0,
                 tid: tid
             }
         }
@@ -133,6 +133,9 @@ impl <K, V> BstNode<K, V> where
     /* Return if the node is valid */
     fn verify() -> bool {
         false
+    }
+
+    fn map_nodes() -> {
     }
 }
 
