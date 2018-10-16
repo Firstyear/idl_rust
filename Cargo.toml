@@ -9,6 +9,6 @@ path = "src/bench.rs"
 
 [dependencies]
 time = "0.1"
-crossbeam-epoch = "*"
-crossbeam-utils = "*"
+crossbeam-epoch = "0.5"
+crossbeam-utils = "0.5"
 

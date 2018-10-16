@@ -135,7 +135,7 @@ impl <K, V> BstNode<K, V> where
         false
     }
 
-    fn map_nodes() -> {
+    fn map_nodes() -> () {
     }
 }
 
