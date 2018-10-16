@@ -23,7 +23,11 @@ impl<T> CowCellInner<T> {
 #[derive(Debug)]
 pub struct CowCell<T> {
     write: Mutex<()>,
-    active: RwLock<CowCellInner<T>>,
+    // I suspect that Mutex is faster here due to lack of needing draining.
+    // RWlock 500 MT: PT2.354443857S
+    // Mutex 500 MT: PT0.006423466S
+    // EBR 500 MT: PT0.003360303S
+    active: Mutex<CowCellInner<T>>,
 }
 
 impl<T> CowCell<T>
@@ -32,24 +36,25 @@ impl<T> CowCell<T>
     pub fn new(data: T) -> Self {
         CowCell {
             write: Mutex::new(()),
-            active: RwLock::new(
+            active: Mutex::new(
                 CowCellInner::new(data)
             ),
         }
     }
 
     pub fn begin_read_txn(&self) -> CowCellReadTxn<T> {
-        let rwguard = self.active.read().unwrap();
+        let rwguard = self.active.lock().unwrap();
         CowCellReadTxn {
             data: rwguard.data.clone()
         }
+        // rwguard ends here
     }
 
     pub fn begin_write_txn(&self) -> CowCellWriteTxn<T> {
         /* Take the exclusive write lock first */
         let mguard = self.write.lock().unwrap();
         /* Now take a ro-txn to get the data copied */
-        let rwguard = self.active.read().unwrap();
+        let rwguard = self.active.lock().unwrap();
         let data: T = (*rwguard.data).clone();
         /* Now build the write struct */
         CowCellWriteTxn {
@@ -61,7 +66,7 @@ impl<T> CowCell<T>
     }
 
     fn commit(&self, newdata: T) {
-        let mut rwguard = self.active.write().unwrap();
+        let mut rwguard = self.active.lock().unwrap();
         *rwguard = CowCellInner::new(newdata);
     }
 }
@@ -150,7 +155,7 @@ mod tests {
 
     fn mt_writer(cc: &CowCell<i64>) {
         let mut last_value: i64 = 0;
-        while last_value < 10 {
+        while last_value < 500 {
             let mut cc_wrtxn = cc.begin_write_txn();
             {
                 let mut_ptr = cc_wrtxn.get_mut();
@@ -164,7 +169,7 @@ mod tests {
 
     fn rt_writer(cc: &CowCell<i64>) {
         let mut last_value: i64 = 0;
-        while last_value < 10 {
+        while last_value < 500 {
             let cc_rotxn = cc.begin_read_txn();
             {
                 assert!(*cc_rotxn >= last_value);
