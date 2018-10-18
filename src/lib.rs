@@ -2,6 +2,8 @@ extern crate crossbeam_epoch;
 extern crate crossbeam_utils;
 
 pub mod cowcell;
+// Linearised cowcell with arc for Bptree
+pub mod lincowcell;
 // pub mod ebrcell;
 pub mod bst;
 

@@ -312,6 +312,10 @@ impl<'a, K, V> BstWriteTxn<'a, K, V> where
 #[cfg(test)]
 mod tests {
     use super::Bst;
+    #[test]
+    fn test_node_basic() {
+        // Test that simple operations on nodes work as expected
+    }
 
     #[test]
     fn test_insert_search_single() {
