@@ -3,28 +3,21 @@ use std::sync::{Mutex, MutexGuard, RwLock, Arc};
 use std::ops::Deref;
 
 #[derive(Debug)]
-struct LinCowCellInner<T> {
-    /*
-     * Later, this needs pointers to the next txn for data ordering.
-     */
-    pub data: Arc<T>,
-    /* Point at the next inner to cause dropping to be linear */
-    pub next: Option<Arc<T>>,
+pub struct LinCowCellInner<T> {
+    data: T,
+    next: Mutex<Option<LinCowCellReadTxn<T>>>,
 }
 
 impl<T> LinCowCellInner<T> {
     pub fn new(data: T) -> Self {
         LinCowCellInner {
-            data: Arc::new(data),
-            next: None
+            data: data,
+            next: Mutex::new(None),
         }
     }
 }
 
-#[derive(Debug)]
-pub struct LinCowCellReadTxn<T> {
-    data: Arc<T>,
-}
+type LinCowCellReadTxn<T> = Arc<LinCowCellInner<T>>;
 
 #[derive(Debug)]
 pub struct LinCowCell<T> {
@@ -33,63 +26,7 @@ pub struct LinCowCell<T> {
     // RWlock 500 MT: PT2.354443857S
     // Mutex 500 MT: PT0.006423466S
     // EBR 500 MT: PT0.003360303S
-    active: Mutex<LinCowCellInner<T>>,
-}
-
-impl<T> LinCowCell<T>
-    where T: Clone
-{
-    pub fn new(data: T) -> Self {
-        LinCowCell {
-            write: Mutex::new(()),
-            active: Mutex::new(
-                LinCowCellInner::new(data)
-            ),
-        }
-    }
-
-    pub fn begin_read_txn(&self) -> LinCowCellReadTxn<T> {
-        let rwguard = self.active.lock().unwrap();
-        LinCowCellReadTxn {
-            data: rwguard.data.clone()
-        }
-        // rwguard ends here
-    }
-
-    pub fn begin_write_txn(&self) -> LinCowCellWriteTxn<T> {
-        /* Take the exclusive write lock first */
-        let mguard = self.write.lock().unwrap();
-        /* Now take a ro-txn to get the data copied */
-        let rwguard = self.active.lock().unwrap();
-        let data: T = (*rwguard.data).clone();
-        /* Now build the write struct */
-        LinCowCellWriteTxn {
-            /* This copies the data */
-            work: data,
-            caller: self,
-            guard: mguard,
-        }
-    }
-
-    fn commit(&self, newdata: T) {
-        let mut rwguard = self.active.lock().unwrap();
-        let new_inner = LinCowCellInner::new(newdata);
-        {
-            // Create the arc pointer to our new data
-            // add it to the last value
-            rwguard.next = Some(new_inner.data.clone());
-        }
-        // now over-write the last value in the mutex.
-        *rwguard = new_inner;
-    }
-}
-
-impl<T> Deref for LinCowCellReadTxn<T> {
-    type Target = T;
-
-    fn deref(&self) -> &T {
-        &self.data
-    }
+    active: Mutex<LinCowCellReadTxn<T>>,
 }
 
 #[derive(Debug)]
@@ -99,6 +36,76 @@ pub struct LinCowCellWriteTxn<'a, T: 'a> {
     // This way we know who to contact for updating our data ....
     caller: &'a LinCowCell<T>,
     guard: MutexGuard<'a, ()>
+}
+
+
+impl<T> LinCowCell<T>
+    where T: Clone
+{
+    pub fn new(data: T) -> Self {
+        LinCowCell {
+            write: Mutex::new(()),
+            active: Mutex::new(
+                Arc::new(
+                    LinCowCellInner::new(data)
+                )
+            ),
+        }
+    }
+
+    pub fn begin_read_txn(&self) -> LinCowCellReadTxn<T> {
+        let rwguard = self.active.lock().unwrap();
+        rwguard.clone()
+        /*
+        LinCowCellReadTxn {
+            data: rwguard.data.clone()
+        }
+        */
+        // rwguard ends here
+    }
+
+    pub fn begin_write_txn(&self) -> LinCowCellWriteTxn<T> {
+        /* Take the exclusive write lock first */
+        let mguard = self.write.lock().unwrap();
+        /* Now take a ro-txn to get the data copied */
+        let rwguard = self.active.lock().unwrap();
+        /* This copies the data */
+        let data: T = (***rwguard).clone();
+        /* Now build the write struct */
+        LinCowCellWriteTxn {
+            work: data,
+            caller: self,
+            guard: mguard,
+        }
+    }
+
+    fn commit(&self, newdata: T) {
+        let mut rwguard = self.active.lock().unwrap();
+        let new_inner = Arc::new(LinCowCellInner::new(newdata));
+        {
+            // This modiries the next pointer of the existing read txns
+            let mut rwguard_inner = rwguard.next.lock().unwrap();
+            // Create the arc pointer to our new data
+            // add it to the last value
+            *rwguard_inner = Some(new_inner.clone());
+        }
+        // now over-write the last value in the mutex.
+        *rwguard = new_inner;
+    }
+}
+
+impl<T> Deref for LinCowCellInner<T> {
+    type Target = T;
+
+    fn deref(&self) -> &T {
+        &self.data
+    }
+}
+
+impl<T> AsRef<T> for LinCowCellInner<T> {
+    fn as_ref(&self) -> &T {
+        &self.data
+    }
 }
 
 impl<'a, T> LinCowCellWriteTxn<'a, T>
@@ -131,7 +138,7 @@ mod tests {
         let cc = LinCowCell::new(data);
 
         let cc_rotxn_a = cc.begin_read_txn();
-        assert_eq!(*cc_rotxn_a, 0);
+        assert_eq!(**cc_rotxn_a, 0);
 
         {
             /* Take a write txn */
@@ -144,18 +151,18 @@ mod tests {
                 *mut_ptr = 1;
                 assert_eq!(*mut_ptr, 1);
             }
-            assert_eq!(*cc_rotxn_a, 0);
+            assert_eq!(**cc_rotxn_a, 0);
 
             let cc_rotxn_b = cc.begin_read_txn();
-            assert_eq!(*cc_rotxn_b, 0);
+            assert_eq!(**cc_rotxn_b, 0);
             /* The write txn and it's lock is dropped here */
             cc_wrtxn.commit();
         }
 
         /* Start a new txn and see it's still good */
         let cc_rotxn_c = cc.begin_read_txn();
-        assert_eq!(*cc_rotxn_c, 1);
-        assert_eq!(*cc_rotxn_a, 0);
+        assert_eq!(**cc_rotxn_c, 1);
+        assert_eq!(**cc_rotxn_a, 0);
     }
 
     fn mt_writer(cc: &LinCowCell<i64>) {
@@ -177,8 +184,8 @@ mod tests {
         while last_value < 500 {
             let cc_rotxn = cc.begin_read_txn();
             {
-                assert!(*cc_rotxn >= last_value);
-                last_value = *cc_rotxn;
+                assert!(**cc_rotxn >= last_value);
+                last_value = **cc_rotxn;
             }
         }
     }
@@ -220,7 +227,7 @@ mod tests {
     impl<T> Drop for TestGcWrapper<T> {
         fn drop(&mut self) {
             // Add to the atomic counter ...
-            println!("Dropping ...");
+            // println!("Dropping ...");
             GC_COUNT.fetch_add(1, Ordering::Release);
         }
     }
