@@ -97,12 +97,14 @@ impl<T> LinCowCell<T>
 impl<T> Deref for LinCowCellInner<T> {
     type Target = T;
 
+    #[inline]
     fn deref(&self) -> &T {
         &self.data
     }
 }
 
 impl<T> AsRef<T> for LinCowCellInner<T> {
+    #[inline]
     fn as_ref(&self) -> &T {
         &self.data
     }
@@ -113,6 +115,7 @@ impl<'a, T> LinCowCellWriteTxn<'a, T>
 {
     /* commit */
     /* get_mut data */
+    #[inline]
     pub fn get_mut(&mut self) -> &mut T {
         &mut self.work
     }
